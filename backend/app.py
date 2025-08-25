@@ -116,6 +116,9 @@ def reports():
         #
         app.logger.info('Attempt to download public keys from keycloak')
         app.config['KEYCLOAK_PUB_KEY'] = getKeycloakPubKey()
+        if app.config['KEYCLOAK_PUB_KEY'] == b'':
+            app.logger.error('Public RSA key was not loaded - could not authorize request')
+            return 'Public RSA key is not accessible', 401
 
     if verifyRequestRights(request.headers.get(AUTH_HEADER_NAME), ALLOWED_USER_ROLE):
         try:
