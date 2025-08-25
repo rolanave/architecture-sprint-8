@@ -5,6 +5,7 @@ const ReportPage: React.FC = () => {
   const { keycloak, initialized } = useKeycloak();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [report, setReport] = useState <string | null> (null);
 
   const downloadReport = async () => {
     if (!keycloak?.token) {
@@ -15,6 +16,7 @@ const ReportPage: React.FC = () => {
     try {
       setLoading(true);
       setError(null);
+      setReport(null)
 
       const response = await fetch(`${process.env.REACT_APP_API_URL}/reports`, {
         headers: {
@@ -22,6 +24,12 @@ const ReportPage: React.FC = () => {
         }
       });
 
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.text();
+      setReport(data);      
       
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
@@ -38,7 +46,15 @@ const ReportPage: React.FC = () => {
     return (
       <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100">
         <button
-          onClick={() => keycloak.login()}
+          onClick={() => {
+            keycloak.init({
+              onLoad: "check-sso",
+              pkceMethod: "S256", // PKCE configuration, S256 is hash function for user code
+              silentCheckSsoRedirectUri:
+                window.location.origin + "/silent-check-sso.html",
+            });
+            keycloak.login()
+          }}
           className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
         >
           Login
@@ -66,6 +82,11 @@ const ReportPage: React.FC = () => {
           <div className="mt-4 p-4 bg-red-100 text-red-700 rounded">
             {error}
           </div>
+        )}
+        {report && (
+          <div className="mt-4 p-4 bg-green-50 text-black-700 rounded">
+          {report}
+        </div>          
         )}
       </div>
     </div>
