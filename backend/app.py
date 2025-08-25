@@ -3,12 +3,14 @@ import os
 from flask import Flask, request, send_from_directory
 from flask_cors import CORS, cross_origin
 import jwt
-
+import requests
+from cryptography.x509 import load_pem_x509_certificate
+from cryptography.hazmat.primitives import serialization
 
 app = Flask(__name__)
 cors = CORS(app)
 app.config['CORS_HEADERS'] = 'Content-Type'
-
+app.config['KEYCLOAK_PUB_KEY'] = b''
 
 DOWNLOAD_FOLDER = '/app/download'
 app.config['DOWNLOAD_FOLDER'] = DOWNLOAD_FOLDER
@@ -16,25 +18,65 @@ app.config['DOWNLOAD_FOLDER'] = DOWNLOAD_FOLDER
 
 REPORT_FILE_NAME = 'report.txt'
 KEYCLOAK_TOKEN_ALG = 'RS256'
-KEYCLOAK_PUB_KEY = b'-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA38hwr1D3GTpU40P3JmgmsGhqLkoUJ7FDJY149KNwf/qWKzCmlwNG8FUTyfGEIrLwPrkaM1z8y48fBtfJjSqtddEymJj4/CLmvI/j+SXVA1CXFpoaL62Hj8lHNQvBuizhvC8sTjrQpiO6Jvtir+5Ll0etHeR1jqOl9LkI7i8dwYZ3O5eEuj9r9mfB4BjNM/jACEYC97jrxqMruJhrvmedZfvzEKmoAj7RkdD1L8ckVl0pmf3qY6cE8QsoHiXbWNUz3RuMUga52MO+AdB0/TFSTFxZ6pfeeK/31hGH6Sq1o5ao6sQeEE/jnuPY3hHHn7w9xzHeNmRrVuvB8zOQdRi5iwIDAQAB\n-----END PUBLIC KEY-----'
 AUTH_HEADER_NAME = 'Authorization'
 ALLOWED_USER_ROLE = 'prothetic_user'
 TOKEN_REALM_ACCESS = 'realm_access'
 TOKEN_ROLES = 'roles'
+KEYCLOAK_URL = 'http://keycloak:8080'
+KEYCLOAK_REALM = 'reports-realm'
+KEYCLOAK_CERTS_PATH = '/realms/'+KEYCLOAK_REALM+'/protocol/openid-connect/certs'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Функция загружает сертификаты из кейклоака и пытается собрать публичный ключ для RSA
+#
+#
+def getKeycloakPubKey ():
+    try:
+        response = requests.get(KEYCLOAK_URL+KEYCLOAK_CERTS_PATH).json()
+        kcKeys = response['keys']
+
+        if kcKeys == '':
+            raise Exception('Could not obtain keys from keycloak: '+response.__str__())
+        
+        rsa_cert = ''
+        for key in kcKeys:
+            if key['alg'] == KEYCLOAK_TOKEN_ALG:
+                rsa_cert = key['x5c'][0]
+                break
+    
+        if rsa_cert == '':
+            raise Exception('No public key for RSA: '+kcKeys.__str__())
+    
+        formattedCert = '-----BEGIN CERTIFICATE-----\n'+rsa_cert+'\n-----END CERTIFICATE-----\n'
+
+        cert_obj = load_pem_x509_certificate(formattedCert.encode(encoding="utf-8"))
+        public_key = cert_obj.public_key()
+        public_pem = public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo)
+
+    except Exception as e:
+        app.logger.error('Error: '+e.__str__()+'\nOriginal request: '+response.__str__())
+        return b''
+    
+    else:
+        app.logger.info('RSA pub key: ' + public_pem.__str__())
+        return public_pem;
+
 
 # Функция проверяет, что переданный Access Token валидный и включает в себя переданную роль
 #
 def verifyRequestRights(authHeader, userRole):
     result = False
     try:
+        if authHeader == None:
+            raise Exception("Auth header is empty")
+        
         # get token from bearer auth header
         token = authHeader.split()[1]
         app.logger.info('Token='+token);
 
         #verify token validity (signiture and expiry date) and get details
-        decoded_payload = jwt.decode(token, KEYCLOAK_PUB_KEY, algorithms=[KEYCLOAK_TOKEN_ALG])
+        decoded_payload = jwt.decode(token, app.config['KEYCLOAK_PUB_KEY'], algorithms=[KEYCLOAK_TOKEN_ALG])
 
         #check if userRole is allowed by token
         tokenRoles = decoded_payload[TOKEN_REALM_ACCESS][TOKEN_ROLES]
@@ -55,7 +97,7 @@ def verifyRequestRights(authHeader, userRole):
         app.logger.info('Token does not include role: '+decoded_payload.__str__());
     
     except Exception as e:
-        app.logger.info('Unexpected error: '+e.__str__())
+        app.logger.info('Error: '+e.__str__())
 
     finally:
         return result
@@ -68,6 +110,13 @@ def verifyRequestRights(authHeader, userRole):
 @app.route('/reports', methods=['GET', 'OPTIONS'])
 @cross_origin()
 def reports():
+    if app.config['KEYCLOAK_PUB_KEY'] == b'':
+        #
+        # Lazy initialization of public key
+        #
+        app.logger.info('Attempt to download public keys from keycloak')
+        app.config['KEYCLOAK_PUB_KEY'] = getKeycloakPubKey()
+
     if verifyRequestRights(request.headers.get(AUTH_HEADER_NAME), ALLOWED_USER_ROLE):
         try:
             return send_from_directory(app.config['DOWNLOAD_FOLDER'], REPORT_FILE_NAME, as_attachment=True), 200
